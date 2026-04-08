@@ -1,0 +1,293 @@
+//#region src/sanitize.ts
+function e(t, n = /* @__PURE__ */ new Set(), r = /* @__PURE__ */ new WeakSet()) {
+	if (t == null) return t;
+	let i = typeof t;
+	if (i === "string" || i === "number" || i === "boolean") return t;
+	if (i === "bigint") return t.toString();
+	if (i === "function" || i === "symbol") return;
+	let a = t;
+	if (r.has(a)) return "[Circular]";
+	if (r.add(a), typeof FormData < "u" && a instanceof FormData) {
+		let t = {};
+		return a.forEach((i, a) => {
+			t[a] = n.has(a.toLowerCase()) ? "[REDACTED]" : e(i, n, r);
+		}), t;
+	}
+	if (typeof File < "u" && a instanceof File) return {
+		__type: "File",
+		name: a.name,
+		size: a.size,
+		type: a.type,
+		lastModified: a.lastModified
+	};
+	if (typeof Blob < "u" && a instanceof Blob) return {
+		__type: "Blob",
+		size: a.size,
+		type: a.type
+	};
+	if (typeof Headers < "u" && a instanceof Headers) {
+		let e = {};
+		return a.forEach((t, r) => {
+			e[r] = n.has(r.toLowerCase()) ? "[REDACTED]" : t;
+		}), e;
+	}
+	if (typeof URLSearchParams < "u" && a instanceof URLSearchParams) {
+		let e = {};
+		return a.forEach((t, n) => {
+			e[n] = t;
+		}), e;
+	}
+	if (a instanceof Error) return {
+		__type: "Error",
+		name: a.name,
+		message: a.message,
+		stack: a.stack
+	};
+	if (a instanceof Date) return new Date(a.getTime());
+	if (a instanceof Map) {
+		let t = {};
+		return a.forEach((i, a) => {
+			t[String(a)] = e(i, n, r);
+		}), t;
+	}
+	if (a instanceof Set) return Array.from(a, (t) => e(t, n, r));
+	if (Array.isArray(a)) return a.map((t) => e(t, n, r));
+	let o = {};
+	for (let [t, i] of Object.entries(a)) {
+		if (n.has(t.toLowerCase())) {
+			o[t] = "[REDACTED]";
+			continue;
+		}
+		let a = e(i, n, r);
+		a !== void 0 && (o[t] = a);
+	}
+	return o;
+}
+//#endregion
+//#region src/idb.ts
+var t = class {
+	constructor(e) {
+		this.config = e, this.dbVersion = 1;
+	}
+	open() {
+		return new Promise((e, t) => {
+			let n = indexedDB.open(this.config.dbName, this.dbVersion);
+			n.onerror = () => t(n.error), n.onsuccess = () => e(n.result), n.onupgradeneeded = (e) => {
+				let t = e.target.result;
+				if (!t.objectStoreNames.contains(this.config.storeName)) {
+					let e = t.createObjectStore(this.config.storeName, { keyPath: "id" });
+					e.createIndex("timestamp", "timestamp", { unique: !1 });
+					for (let t of this.config.indexes) e.createIndex(t, t, { unique: !1 });
+				}
+			};
+		});
+	}
+	async withDB(e, t) {
+		let n = await this.open();
+		try {
+			return await t(n.transaction([this.config.storeName], e).objectStore(this.config.storeName), n);
+		} finally {
+			n.close();
+		}
+	}
+	add(e) {
+		return this.withDB("readwrite", (t) => this.req(t.add(e)));
+	}
+	getAll() {
+		return this.withDB("readonly", (e) => this.req(e.getAll()));
+	}
+	getAllByIndex(e, t) {
+		return this.withDB("readonly", (n) => {
+			let r = n.index(e);
+			return this.req(r.getAll(t));
+		});
+	}
+	getAllByRange(e, t) {
+		return this.withDB("readonly", (n) => {
+			let r = n.index(e);
+			return this.req(r.getAll(t));
+		});
+	}
+	delete(e) {
+		return this.withDB("readwrite", (t) => this.req(t.delete(e)));
+	}
+	clear() {
+		return this.withDB("readwrite", (e) => this.req(e.clear()));
+	}
+	count() {
+		return this.withDB("readonly", (e) => this.req(e.count()));
+	}
+	cleanup(e, t) {
+		return this.withDB("readwrite", async (n) => {
+			await this.deleteByCursor(n.index("timestamp").openCursor(IDBKeyRange.upperBound(e)), n, Infinity);
+			let r = await this.req(n.count());
+			r > t && await this.deleteByCursor(n.index("timestamp").openCursor(), n, r - t);
+		});
+	}
+	req(e) {
+		return new Promise((t, n) => {
+			e.onsuccess = () => t(e.result), e.onerror = () => n(e.error);
+		});
+	}
+	deleteByCursor(e, t, n) {
+		return new Promise((r) => {
+			let i = 0;
+			e.onsuccess = (e) => {
+				let a = e.target.result;
+				a && i < n ? (t.delete(a.primaryKey), i++, a.continue()) : r();
+			}, e.onerror = () => r();
+		});
+	}
+}, n = class {
+	constructor(e = {}) {
+		this.queue = [], this.flushTimer = null, this.config = {
+			dbName: e.dbName ?? "ErrorStorage",
+			storeName: e.storeName ?? "errors",
+			maxErrors: e.maxErrors ?? 1e3,
+			retentionDays: e.retentionDays ?? 30,
+			indexes: e.indexes ?? [],
+			sanitize: e.sanitize ?? !0,
+			redactKeys: e.redactKeys ?? [],
+			remoteUrl: e.remoteUrl ?? null,
+			remoteHeaders: e.remoteHeaders ?? {},
+			batchRemote: e.batchRemote ?? !1,
+			flushInterval: e.flushInterval ?? 3e4,
+			maxQueueSize: e.maxQueueSize ?? 500,
+			beforeSave: e.beforeSave,
+			onError: e.onError,
+			onRemoteError: e.onRemoteError
+		}, this.redactKeysSet = new Set(this.config.redactKeys.map((e) => e.toLowerCase())), this.idb = new t(this.config), this.config.batchRemote && this.config.remoteUrl && this.startFlushTimer();
+	}
+	handleError(e, t) {
+		this.config.onError?.(e, { operation: t });
+	}
+	async save(t, n) {
+		let r = this.config.sanitize ? e(t, this.redactKeysSet) : t, i = this.config.sanitize ? e(n, this.redactKeysSet) : n, a = {
+			id: this.generateId(),
+			timestamp: Date.now(),
+			data: r,
+			meta: i
+		};
+		if (this.config.beforeSave && !await this.config.beforeSave(a)) return a;
+		let o = !1;
+		try {
+			await this.idb.add(a), await this.idb.cleanup(Date.now() - this.config.retentionDays * 864e5, this.config.maxErrors), o = !0;
+		} catch (e) {
+			this.handleError(e, "save");
+		}
+		return this.config.remoteUrl && (this.config.batchRemote ? this.enqueue(a) : this.sendToRemote([a])), o ? a : null;
+	}
+	async getAll() {
+		try {
+			return (await this.idb.getAll()).sort((e, t) => t.timestamp - e.timestamp);
+		} catch (e) {
+			return this.handleError(e, "getAll"), [];
+		}
+	}
+	async getByDateRange(e, t) {
+		try {
+			return await this.idb.getAllByRange("timestamp", IDBKeyRange.bound(e.getTime(), t.getTime()));
+		} catch (e) {
+			return this.handleError(e, "getByDateRange"), [];
+		}
+	}
+	async getByIndex(e, t) {
+		try {
+			return this.idb.getAllByIndex(e, t);
+		} catch (e) {
+			return this.handleError(e, "getByIndex"), [];
+		}
+	}
+	async getStatistics() {
+		try {
+			let e = await this.idb.getAll();
+			if (e.length === 0) return {
+				totalErrors: 0,
+				oldestTimestamp: null,
+				newestTimestamp: null
+			};
+			let t = e.map((e) => e.timestamp);
+			return {
+				totalErrors: e.length,
+				oldestTimestamp: Math.min(...t),
+				newestTimestamp: Math.max(...t)
+			};
+		} catch (e) {
+			return this.handleError(e, "getStatistics"), {
+				totalErrors: 0,
+				oldestTimestamp: null,
+				newestTimestamp: null
+			};
+		}
+	}
+	async exportAsJSON() {
+		let e = await this.getAll(), t = await this.getStatistics();
+		return JSON.stringify({
+			exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+			statistics: t,
+			errors: e
+		}, null, 2);
+	}
+	async downloadJSON(e) {
+		if (typeof document > "u") return;
+		let t = await this.exportAsJSON(), n = new Blob([t], { type: "application/json" }), r = URL.createObjectURL(n), i = document.createElement("a");
+		i.href = r, i.download = e ?? `errors-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`, i.click(), URL.revokeObjectURL(r);
+	}
+	async delete(e) {
+		try {
+			return await this.idb.delete(e), !0;
+		} catch (e) {
+			return this.handleError(e, "delete"), !1;
+		}
+	}
+	async clear() {
+		try {
+			return await this.idb.clear(), !0;
+		} catch (e) {
+			return this.handleError(e, "clear"), !1;
+		}
+	}
+	async flush() {
+		if (this.queue.length === 0) return;
+		let e = this.queue.splice(0);
+		await this.sendToRemote(e);
+	}
+	async sendToRemote(e) {
+		if (this.config.remoteUrl) try {
+			let t = await fetch(this.config.remoteUrl, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					...this.config.remoteHeaders
+				},
+				body: JSON.stringify({ errors: e })
+			});
+			if (!t.ok) throw Error(`Remote responded with ${t.status}`);
+		} catch (t) {
+			if (this.config.batchRemote && (this.queue.unshift(...e), this.queue.length > this.config.maxQueueSize)) {
+				let e = this.queue.length - this.config.maxQueueSize;
+				this.queue.splice(this.queue.length - e, e), this.handleError(/* @__PURE__ */ Error(`Queue overflow on retry: dropped ${e} newest record(s)`), "sendToRemote");
+			}
+			this.config.onRemoteError?.(t);
+		}
+	}
+	startFlushTimer() {
+		this.flushTimer = setInterval(() => {
+			this.flush().catch((e) => this.config.onRemoteError?.(e));
+		}, this.config.flushInterval), this.flushTimer && typeof this.flushTimer == "object" && "unref" in this.flushTimer && this.flushTimer.unref();
+	}
+	enqueue(...e) {
+		if (this.queue.push(...e), this.queue.length > this.config.maxQueueSize) {
+			let e = this.queue.length - this.config.maxQueueSize, t = this.queue.splice(0, e);
+			this.handleError(/* @__PURE__ */ Error(`Queue overflow: dropped ${t.length} oldest record(s)`), "enqueue");
+		}
+	}
+	destroy() {
+		this.flushTimer &&= (clearInterval(this.flushTimer), null);
+	}
+	generateId() {
+		return `${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+	}
+};
+//#endregion
+export { n as ErrorStorage, e as sanitize };
