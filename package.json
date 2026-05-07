@@ -1,6 +1,6 @@
 {
   "name": "@nyang96/error-log-store",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -24,5 +24,6 @@
     "typescript": "^6.0.2",
     "vite": "^8.0.4",
     "vite-plugin-dts": "^4.5.4"
-  }
+  },
+  "license": "MIT"
 }
