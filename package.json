@@ -1,5 +1,5 @@
 {
-  "name": "@nyang96/error-log-store",
+  "name": "@sinaedle/error-log-store",
   "version": "1.0.0",
   "type": "module",
   "main": "./dist/index.cjs",
